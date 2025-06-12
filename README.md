@@ -53,7 +53,6 @@ image=projects/$PROJECT_ID/global/images/$IMAGE_NAME,mode=rw,size=300,type=pd-ba
   --reservation-affinity=any
 ```
 
-
 ---
 
 ## 🔐 Step 3: SSH into the VM
@@ -66,96 +65,113 @@ gcloud compute ssh crc-mongodb-demo --zone=us-central1-c
 
 ## 📦 Step 4: Inside the VM
 
-1. Log into OpenShift:
+1. Start the CRC cluster and wait for it to initialize:
 
 ```bash
 crc start
+```
+
+Once the CRC cluster is ready, you should see output that includes cluster details and confirmation messages.
+
+2. Export the environment to access `oc` commands:
+
+```bash
+eval $(crc oc-env)
+```
+
+3. Log into OpenShift:
+
+```bash
 crc console --credentials
 ```
 
 2. Install MongoDB Controllers via OperatorHub UI or CLI.
 
-3. Create a ConfigMap for Ops Manager settings (example below):
+3. Generate the required ConfigMap and Secret directly from Cloud Manager or Ops Manager:
 
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongodb-operator-config
-  namespace: mongodb
-  labels:
-    app.kubernetes.io/name: mongodb-enterprise-operator
-    app.kubernetes.io/instance: mongodb
-    app.kubernetes.io/component: controller
-    app.kubernetes.io/part-of: mongodb-enterprise
-    app.kubernetes.io/managed-by: mongodb-enterprise-operator
-    app.kubernetes.io/version: v1.0.0
-    app.kubernetes.io/created-by: crc-demo
-    app.kubernetes.io/ops-manager-url: https://<your-ops-manager-url>
-data:
-  baseUrl: https://<your-ops-manager-url>
-  orgId: <your-org-id>
-```
+* Navigate to **Kubernetes Setup** under your organization in Cloud Manager/Ops Manager
+* Click **"Create New API Keys"** or **"Use Existing API Keys"**
+* Click **"Generate Key and YAML"**
+* You will receive two YAML files: `config-map.yaml` and `secret.yaml`
 
-4. Create a secret with your Ops Manager public and private keys:
+4. Apply them to your cluster:
 
 ```bash
-kubectl create secret generic mongodb-opsmgr-secret \
-  --from-literal=publicKey=<your-public-key> \
-  --from-literal=privateKey=<your-private-key> \
-  -n mongodb
+kubectl apply -f secret.yaml -f config-map.yaml
 ```
 
 5. Deploy a 3-node ReplicaSet CRD (example):
 
 ```yaml
 apiVersion: mongodb.com/v1
-kind: MongoDB
+kind: MongoDBReplicaSet
 metadata:
-  name: demo-mongodb-cluster-100
+  name: demo-replicaset
   namespace: mongodb
 spec:
   members: 3
-  version: 8.0.0
-  type: ReplicaSet
-  security:
-    authentication:
-      enabled: true
-      modes: ["SCRAM"]
-  cloudManager:
+  version: 6.0.5
+  opsManager:
     configMapRef:
       name: my-project
-  credentials: organization-secret
+    credentials: organization-secret
+  type: ReplicaSet
   persistent: true
-  podSpec:
-    persistence:
-      single:
-        storage: 10Gi
-        storageClass: crc-csi-hostpath-provisioner
-    podTemplate:
-      spec:
-       containers:
-        - name: mongodb-enterprise-database
-          resources:
-            limits:
-              cpu: 2
-              memory: 1G
-            requests:
-              cpu: 1
-              memory: 1G
-            persistence:
-              single:
-                storage: 10Gi
-                storageClass: crc-csi-hostpath-provisioner
+  security:
+    authentication:
+      modes: [SCRAM]
 ```
 
 6. Create a MongoDB database user (via Ops Manager or AutomationConfig if required).
+
+7. Expose required ports using socat (if running behind NAT or port forwarding):
+
+```bash
+sudo socat TCP-LISTEN:443,fork TCP:192.168.130.11:443 &
+sudo socat TCP-LISTEN:32017,fork TCP:192.168.130.11:32017 &
+```
+
+8. Ensure the following GCP firewall rules are in place:
+
+| Name                     | Direction | Target Tags  | Ports        | Action | Network |
+| ------------------------ | --------- | ------------ | ------------ | ------ | ------- |
+| `egress`                 | Egress    | opsmgr       | tcp:8080     | Allow  | default |
+| `mongodbegresscustom`    | Egress    | openshift    | tcp:32017    | Allow  | default |
+| `mongoegress`            | Egress    | openshift    | tcp:27017    | Allow  | default |
+| `openshiftegress`        | Egress    | openshift    | tcp:8443     | Allow  | default |
+| `default-allow-http`     | Ingress   | http-server  | tcp:80       | Allow  | default |
+| `default-allow-https`    | Ingress   | https-server | tcp:443      | Allow  | default |
+| `ingress-opsmgr`         | Ingress   | opsmgr       | tcp:8080     | Allow  | default |
+| `mongo`                  | Ingress   | openshift    | tcp:27017    | Allow  | default |
+| `mongodbcustomport`      | Ingress   | openshift    | tcp:32017    | Allow  | default |
+| `openshiftapi`           | Ingress   | openshift    | tcp:6443     | Allow  | default |
+| `openshiftconsole`       | Ingress   | openshift    | tcp:8443     | Allow  | default |
+| `default-allow-icmp`     | Ingress   | all          | icmp         | Allow  | default |
+| `default-allow-internal` | Ingress   | all          | tcp/udp/icmp | Allow  | default |
+| `default-allow-rdp`      | Ingress   | all          | tcp:3389     | Allow  | default |
+| `default-allow-ssh`      | Ingress   | all          | tcp:22       | Allow  | default |
 
 ---
 
 ## ✅ Demo Ready
 
 You now have a functional 3-node MongoDB ReplicaSet running on OpenShift CRC managed by MongoDB Controllers.
+
+---
+
+## 📌 Final Cleanup Reminder
+
+Once your demo is complete, don't forget to:
+
+```bash
+# Delete the VM
+gcloud compute instances delete crc-mongodb-demo --zone=us-central1-c --project=$PROJECT_ID
+
+# Delete the custom image
+gcloud compute images delete mongodb-demo-crc --project=$PROJECT_ID
+```
+
+This will help avoid unnecessary charges and free up resources.
 
 ---
 
